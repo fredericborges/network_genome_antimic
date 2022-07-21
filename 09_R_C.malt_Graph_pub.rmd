@@ -1,0 +1,659 @@
+---
+title: "Mining biosynthetic gene clusters in Carnobacterium maltaromaticum by interference competition network and genome analysis"
+author: "F. Borges"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: flatly
+    keep_md: yes
+    number_sections: yes
+    toc : yes
+    toc_float : yes
+  word_document: 
+    number_sections: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+# knitr::opts_chunk$set(echo = FALSE) # to hide the code in the final report
+knitr::opts_chunk$set(message = FALSE) # to hide the messages given in the output
+knitr::opts_chunk$set(warning = FALSE) # to hide the warnings
+knitr::opts_chunk$set(dpi = 300)
+#knitr::opts_chunk$set(cache=TRUE) #les code chunk, excepté s’ils sont modifiés, ne seront évalués qu’une seule fois
+```
+
+# NOTE
+The compilation of this Rmarkdown file will produce the graphics as separated files. See in the directory "output".  
+
+# LIBRARIES
+```{r}
+library(tidyverse)
+library(ComplexHeatmap)
+library(viridis)
+library(ggrepel)
+library(ggthemes)
+library(ggprism)
+library(factoextra)
+```
+
+
+# DATA PREPARATION
+Seed for reproducible code
+```{r}
+set.seed(666)
+```
+
+Load the names of the strains described in (Ramia et al, 2020)
+```{r}
+strains_ramia <- read.csv2(here::here("data-clean","strains_ramia2020.csv"),
+                check.names = F, 
+                dec = ",",
+                stringsAsFactors = T)
+
+```
+
+Load the graph data
+```{r}
+mat <- read.csv2(here::here("data-clean","20220201_INHIB_MAT_ROW-SEND_clean2.csv"),
+                check.names = F, 
+                dec = ",",
+                stringsAsFactors = T)
+
+names(mat)[1] <- "from"
+```
+
+load the table indicating which strains have been genome sequenced
+```{r}
+genome <- read.csv2(here::here("data-clean","genome_bin.csv"),
+                check.names = F, 
+                dec = ",",
+                stringsAsFactors = T)
+
+genome$genome <- as.character(genome$genome)
+```
+
+```{r}
+genome_yes <- genome %>% 
+  filter(genome==1)
+genome_yes <- genome_yes$strain
+genome_yes <- droplevels(genome_yes)
+
+```
+
+How many genomes were analyzed ?
+```{r}
+length(genome_yes)
+```
+
+
+Define the strains inhibiting EGDe by the kmeans clustering method
+```{r}
+# make dataframe with the EGDe inhibition values
+EGDe_inhib <- mat %>% 
+  select(from, EGDe) %>% 
+  column_to_rownames("from")
+# Define the number of clusters 
+EGDe_inhib_sc <- scale(EGDe_inhib)
+fviz_nbclust(EGDe_inhib_sc, kmeans, method = "silhouette")+
+  labs(subtitle = "Silhouette method") 
+# => 2 clusters
+# Kmeans clustering with the value of 2 clusters
+km.out = kmeans(EGDe_inhib_sc,centers=2,nstart =20) 
+EGDe_inhib <-  data.frame(km.out$cluster)
+EGDe_inhib <- rownames_to_column(EGDe_inhib, "from")
+colnames(EGDe_inhib)[2] <- "EGDe_bin"
+EGDe_inhib <- EGDe_inhib %>% 
+  mutate(EGDe_bin=ifelse(EGDe_bin==2, 1,0))
+```
+
+
+Build a binary matrix with all the data by using 300 as a threshold for Carno Vs Carno. For Carno Vs Listeria => use the EGDe_bin dataframe defined above
+```{r}
+mat_bin <- mat
+
+for (i in 2:77) {   
+  mat_bin[ , i]=ifelse(mat[ , i]>300, 1, 0)
+}
+
+mat_bin <- full_join(mat_bin,EGDe_inhib,by="from")
+
+
+row.names(mat_bin) <- mat_bin$from
+mat_bin <- select(mat_bin,-1)
+```
+Binary matrix without the values for Listeria
+```{r}
+mat_df_bin <- select(mat_bin, 1:76)
+```
+
+Calculation of the degrees
+```{r}
+# Degrees
+## creation of an empty dataframe to store the results of calculation we'll do after
+deg_receiver <- data.frame(strain=colnames(mat_df_bin),
+                           Receiver=rep(0, ncol(mat_df_bin)))
+
+deg_sender <- data.frame(strain=rownames(mat_df_bin),
+                         Sender=rep(0, nrow(mat_df_bin)))
+
+
+## Calculation of the Receiver degrees
+for (i in 1:nrow(mat_df_bin)){
+  deg_receiver[i, 2]<-sum(mat_df_bin[ ,i])
+}
+
+## Calculation of the Sender degrees
+for (i in 1:ncol(mat_df_bin)){
+  deg_sender[i, 2]<-sum(mat_df_bin[i,2:ncol(mat_df_bin)])
+}
+# Fusion matrix and degrees
+deg <-  full_join(deg_sender, deg_receiver, by="strain")
+deg_temp <- deg
+names(deg_temp)[names(deg_temp)=="strain"] <- "from"
+mat_inhib_deg <- full_join(mat,deg_temp, by="from")
+rm(deg_temp)
+# Create a column -+ for Listeria strainsn threshold 250. 
+mat_inhib_deg2 <- full_join(mat_inhib_deg,EGDe_inhib, by="from")
+```
+
+# INHIBITION MATRIX
+```{r}
+# Change the name of "strain" column to "from" in order to be able to make subsequent fusions with merge 
+names(deg_receiver)[names(deg_receiver)=="strain"] <- "from"
+names(deg_sender)[names(deg_sender)=="strain"] <- "from"
+# merge 
+send_ord <- mat %>%
+  merge(deg_sender, on="from") %>%
+  arrange(desc(Sender))
+
+from <- send_ord$from
+
+send_ord_sel <- select(send_ord, c(-1,-ncol(send_ord)))
+colnames_send_ord <- names(send_ord_sel)
+send_ord_sel_t <- t(send_ord_sel)
+send_ord_sel_t <- as.data.frame(send_ord_sel_t)
+names(send_ord_sel_t) <- from
+
+send_ord_sel_t <- cbind(colnames_send_ord, send_ord_sel_t)
+
+names(send_ord_sel_t)[names(send_ord_sel_t) == "colnames_send_ord"] <- "from"
+
+send_receiv_ord <- send_ord_sel_t %>%
+  merge(deg_receiver, on="from") %>%
+  arrange(desc(Receiver))
+
+rownames(send_receiv_ord)<-send_receiv_ord$from
+send_receiv_ord <- select(send_receiv_ord, c(-ncol(send_receiv_ord),-1))
+
+# Transpose the dataframe in order to have senders=rows  receivers=columns
+send_receiv_ord_t <-t(send_receiv_ord)
+
+```
+
+```{r fig.width=8, fig.height=8}
+hist(send_receiv_ord_t, col="blue", main ="GII", xlab = "")
+```
+
+# NEW STRAINS ADDED IN THE INHIBITION GRAPH
+In Ramia et al., 2020, we described the antagonistic properties of 73 strains. 
+In this study, we have added the data of 3 additionnal strains :
+```{r}
+a <- as.character(from)
+b <- as.vector(unlist(strains_ramia))
+setdiff(a,b)
+rm(a,b)
+```
+
+# NESTEDNESS STRUCTURE
+```{r fig.width=17, fig.height=17}
+# Heatmap
+send_receiv_ord <- as.matrix(send_receiv_ord)
+
+# prepare de data for left and top annotation in order to add the genome availibility 
+## vector contaning the order of appearance of strains in the ordered heatmap :
+send_vec <- colnames(send_receiv_ord)
+receiv_vec <- rownames(send_receiv_ord)
+## order the genome dataframe according to send_vec and receiv_vec
+genome_send <- genome %>% 
+  arrange(factor(strain, levels=send_vec))
+genome_receiv <- genome %>% 
+  arrange(factor(strain, levels=receiv_vec))
+## Define the parameters which will be used in the heatmap function for left_annotation and top_annotation
+ha_send_left = rowAnnotation(genome = genome_send$genome,
+                             col = list(genome = c("0" = "white", 
+                                                   "1" = "grey25")),
+                             gp = gpar(col = "black"),
+                             show_legend = FALSE#,
+                             #show_annotation_name = FALSE
+                             )
+
+ha_receiv_top = HeatmapAnnotation(genome  = genome_receiv$genome,
+                                  height = unit(3, "cm"),
+                                  col=list(genome = c("0" = "white",
+                                                      "1" = "grey25")),
+                                  gp = gpar(col = "black"),
+                                  show_legend = FALSE
+)
+
+# Draw the heatmap
+p <- Heatmap(send_receiv_ord_t,
+        name = "Inhibition\nintensity", #title of legend
+        show_heatmap_legend = FALSE,
+        column_title = "Receiver", row_title = "Sender",
+        column_title_gp = gpar(fontsize = 20),
+        row_title_gp = gpar(fontsize = 20),
+        row_names_gp = gpar(fontsize = 15),# Text size for row names
+        column_names_gp = gpar(fontsize = 15), # Text size for column names
+        row_names_side = "left", # names of the rows on the left
+        column_names_side = "top",
+        column_dend_side = "top", # dendrogram on the left
+        row_dend_width = unit(4, "cm"), # size of the dendrogram on rows
+        column_dend_height = unit(4, "cm"),# size of the dendrogram on columns
+        col = inferno(100),
+        cluster_columns=FALSE,
+        cluster_rows = FALSE,
+        top_annotation = ha_receiv_top,
+        left_annotation = ha_send_left
+)
+
+p
+#Export
+tiff(file.path("output","nestedness.tiff"),
+     units="in", width=17,height=17,res=1000)
+p
+dev.off()
+rm(p)
+```
+
+
+# WEIGHT OF INHIBITION = f(Sender)
+## Graphics
+```{r fig.cap="only the strains for which the genome was sequenced and the sender degree is >0 are labeled with the strain name"}
+r <- mat_inhib_deg2
+mat_0_NA <- mat
+mat_0_NA <- mat_0_NA %>% 
+  select("from":"F2") %>% 
+  pivot_longer(cols="ATCC35586":"F2",
+               names_to="to",
+               values_to="weight") %>% 
+  mutate(weight=ifelse(weight<300,0,weight)) %>% 
+  filter(weight!=0) %>% 
+  group_by(from)%>%
+  summarize(mean_weight= mean(weight, na.rm=TRUE))
+
+t <- full_join(r,mat_0_NA,by="from")
+
+t$EGDe_bin <- as.factor(t$EGDe_bin)
+p <- ggplot(t, aes(x=Sender, y=mean_weight))+
+  geom_smooth(method = "lm", 
+              color="snow4", 
+              fill="snow2")+
+  geom_point(alpha = 0.8, aes(color=EGDe_bin))+
+  scale_color_manual(values=c("purple4","red3"))+
+  geom_label_repel (aes(label = ifelse(from %in% genome_yes & Sender>0, from, ""), color=EGDe_bin), # label only the strains for which Sender degree >20
+                  max.overlaps = 100,
+                  size= 2.8,
+                  segment.color = ifelse(mat_inhib_deg2$EGDe_bin=="0",
+                                         "purple4", 
+                                         "red3"),
+                  min.segment.length = 0,
+                  box.padding = 0.5,
+                  label.padding = 0.15,
+                  label.r = 0.13,
+                  label.size =0.4
+                  )+
+  labs(x="Sender degree", y="Mean inhibition weight (min)")+
+  theme_base()+
+  theme(legend.position = "none")
+p
+#Export
+tiff(file.path("output","weight-send.tiff"),
+     units="in", width=6,height=6,res=1000)
+p
+dev.off()
+rm(p)
+```
+
+## Linear regression
+Model
+```{r}
+cor.test(t$Sender,t$mean_weight, method=c("pearson"))
+```
+p-value <0.05, the null hypothesis is rejected. 
+
+```{r}
+cor(t$Sender,t$mean_weight, method=c("pearson"))
+
+```
+the correlation coeficient is close to 1
+
+```{r}
+lm1 <- lm(t$Sender~t$mean_weight)
+lm1
+```
+
+
+```{r}
+summary(lm1)
+```
+
+
+Are the residuals normality distributed ?
+```{r}
+hist(lm1$residuals)
+```
+the distribution of the data are close to normal distribution.
+
+Autocorrelation test
+```{r}
+library(car)
+durbinWatsonTest(lm1)
+```
+The null hypothesis is not rejected, the residuals are independant, there is no autocorrelation of the data. 
+
+
+
+# CLUSTERING HEATMAP
+```{r fig.width=15, fig.height=9}
+mat_inhib_deg2_genome <- mat_inhib_deg2 %>% 
+  filter(from %in% genome_yes)
+rownames(mat_inhib_deg2_genome) <- mat_inhib_deg2_genome$from
+mat_inhib_deg2_genome <- mat_inhib_deg2_genome[,-1]
+
+
+row_ha <- rowAnnotation("anti-Listeria"=anno_barplot(mat_inhib_deg2_genome$EGDe,
+                                                     width = unit(4,"cm")))
+mat_inhib_deg2_genome_1_76 <- select(mat_inhib_deg2_genome, 1:76)
+
+for (i in 1:ncol(mat_inhib_deg2_genome_1_76)) {   
+  mat_inhib_deg2_genome_1_76[ , i]=ifelse(mat_inhib_deg2_genome_1_76[ , i]>300, 1, 0)
+}
+
+p <- Heatmap(mat_inhib_deg2_genome_1_76,
+        cluster_columns = FALSE,
+        #name = "Inhibition\nintensity", #title of legend
+        show_heatmap_legend = FALSE,
+        column_title = "Receiver", row_title = "Sender",
+        column_title_gp = gpar(fontsize = 20),
+        row_title_gp = gpar(fontsize = 20),
+        row_names_gp = gpar(fontsize = 18),# Text size for row names
+        column_names_gp = gpar(fontsize = 10), # Text size for column names
+        row_names_side = "left", # names of the rows on the left
+        column_names_side = "top",
+        column_dend_side = "top", # dendrogram on the left
+        row_dend_width = unit(4, "cm"), # size of the dendrogram on rows
+        col = viridis(100),
+        clustering_distance_rows ="euclidean",
+        clustering_method_rows = "average",
+        left_annotation = rowAnnotation(foo = anno_block(gp = gpar(fill = 0:0),
+        labels = c("gp1", "gp2", "gp3"), 
+        labels_gp = gpar(col = "black", fontsize = 15))),
+        row_km = 3,
+        right_annotation = row_ha
+)
+p
+#Export
+tiff(file.path("output","clust_heatmap.tiff"),
+     units="in", width=17,height=10,res=1000)
+p
+dev.off()
+rm(p)
+```
+
+# GROUPS GP1, GP2, GP3: STATISTICAL ANALYSIS
+```{r}
+# add gp1,gp2 and gp3 as categorical variable
+strains <- c("10040100629",
+             "F2",
+             "F88",
+             "9.4",
+             "DSM20344")
+  
+gp <- "gp1"
+gp1 <- cbind(strains, gp)
+
+strains <- c("F4",
+             "IFIP 710",
+             "F84",
+             "F14",
+             "CIP100481",
+             "F7",
+             "CP5",
+             "CP4",
+             "LMA28",
+             "CIP102035",
+             "JIP 28/91",
+             "CP1",
+             "CP14",
+             "8.1",
+             "F42",
+             "MM 3364.01",
+             "MM 3365.01")
+gp <- "gp2"
+gp2 <- cbind(strains,gp)
+
+
+strains <- c("F48",
+             "F73",
+             "CIP101354",
+             "LLS R 919",
+             "DSM20590",
+             "JIP 05/93",
+             "RFA 378") 
+gp <- "gp3"
+gp3 <- cbind(strains,gp)
+
+
+gp <- rbind(gp1,gp2,gp3)
+mat_inhib_deg2_genome <- rownames_to_column(mat_inhib_deg2_genome, var = "strains")
+
+rm(strains)
+
+mat_inhib_deg2_genome <- as.data.frame(mat_inhib_deg2_genome)
+gp <- as.data.frame(gp)
+mat_inhib_deg2_genome <- full_join(mat_inhib_deg2_genome, gp, by="strains")
+```
+
+```{r}
+lm1 <- lm(EGDe~gp, data = mat_inhib_deg2_genome)
+summary(lm1)
+anova(lm1)
+aov1 <- aov(EGDe~gp, data = mat_inhib_deg2_genome)
+anova(aov1)
+```
+
+```{r}
+tuk <- TukeyHSD(aov1)
+tuk <- as.data.frame(tuk$gp)
+tuk <- rownames_to_column(tuk, var="gp")
+tuk <- tuk %>% 
+  separate(col= gp,
+           into = c("group1", "group2"),
+           sep = "-") %>% 
+  mutate(p_vals=formatC(`p adj`, format = "e", digits = 2)) %>% 
+  select(group1,group2, `p_vals`) 
+
+y.position <- c(800,750,200)
+tuk <- cbind(tuk, y.position)
+```
+
+
+```{r}
+base <- ggplot(mat_inhib_deg2_genome, aes(x = gp, y = EGDe)) +
+  geom_boxplot(notch = FALSE,
+               color="mistyrose4",
+               fill="mistyrose4",
+               alpha=0.3
+               ) +
+  geom_jitter(width = 0.1,
+              height = 0.1,
+              alpha = 0.3) +
+  scale_y_continuous(limits = c(0, 850)) +
+  labs(x = "", y = "Inhibition weight (min)") +
+  theme_base()
+
+
+p <- base + 
+  add_pvalue(tuk, label = "p = {`p_vals`}", tip.length = 0, label.size = 4)
+
+p
+
+#Export
+tiff(file.path("output","anov_weight.tiff"),
+     units="in", width=3,height=7,res=1000)
+p
+dev.off()
+rm(p)
+```
+```{r}
+rm(tuk, base, y.position)
+```
+
+# OCCURENCE
+## DATA PREPARATION
+```{r}
+occ <-
+  read.csv2(
+    here::here("data-clean", "occurence3_no_imm2.csv"),
+    check.names = F,
+    header = T,
+    stringsAsFactors = T
+  )
+
+occ <- occ %>% 
+  arrange(factor(Strains, levels = gp$strains))
+
+bacteriocin_new <-
+  read.csv2(
+    here::here("data-clean", "bacteriocin_new.csv"),
+    check.names = F,
+    header = T,
+    stringsAsFactors = T
+  )
+bacteriocin_new$new <- as.factor(bacteriocin_new$new)
+```
+
+```{r}
+mat_occ <- as.matrix(occ)
+rownames(mat_occ) <- mat_occ[,1] 
+mat_occ <- mat_occ[,-1]
+```
+
+## HEATMAP
+```{r}
+# calculate the meanweight of inhibition of receivers for each strain for which the genome was sequenced 
+weight <- mat
+weight <- weight %>% 
+select("from":"F2") %>% 
+  pivot_longer(cols="ATCC35586":"F2",
+               names_to="to",
+               values_to="weight") %>% 
+  mutate(weight=ifelse(weight<300,NA,weight)) %>% 
+  filter(from %in% genome_yes) %>% 
+  group_by(from)%>%
+  summarize(mean_weight= mean(weight, na.rm=TRUE))
+weight$from <- droplevels(weight$from)
+weight <- weight[match(rownames(mat_occ), weight$from),]
+ 
+
+# define the colors 
+colors = structure(
+  c("gray93","paleturquoise3", "palevioletred3"),#"seashell"
+  names = c(0,1,2)
+)
+t <-mat_inhib_deg2_genome %>% 
+  select(strains,EGDe_bin)
+
+colnames(t)[colnames(t) == 'EGDe_bin'] <- 'EGDe'
+
+gp <- left_join(gp,t, by="strains")
+
+ha_EGDe <-  rowAnnotation(EGDe = gp$EGDe,
+                          col = list(EGDe = c("0" = "white", 
+                                              "1" = "gray23")),
+                          gp = gpar(col = "black"),
+                          show_legend = FALSE#,
+                             #show_annotation_name = FALSE
+                             )
+
+p <- Heatmap(
+  mat_occ,
+  
+  # NO LEGENDS 
+  show_heatmap_legend = FALSE,
+  
+  # TITLES
+  column_title = "Bacteriocin",
+  row_title = "Strain",
+  
+  # Add frame to each cells
+  rect_gp = gpar(col = "white", lwd = 1),
+  # Text size for row names
+  row_names_gp = gpar(fontsize = 9),
+  # Text size for column names
+  column_names_gp = gpar(fontsize = 9),
+  
+  # names of the rows on the left
+  row_names_side = "left",
+  column_names_side = "top",
+  col = colors,
+  
+  
+  # SPLIT COLUMNS
+  column_split = c(
+    rep("class I", 4),
+    rep("Class IIa", 7),
+    rep("class IIc", 1)
+  ),
+  column_gap = unit(3, "mm"),
+  
+  
+  # TOP ANNOTATION
+  top_annotation = HeatmapAnnotation(
+    new  = bacteriocin_new$new,
+    col=list(new = c("0" = "white", "1" = "plum3")), #"seagreen3"
+    simple_anno_size = unit(0.3,"cm"),
+    show_legend = FALSE,
+    show_annotation_name = FALSE,
+    foo = anno_block(
+      gp = gpar(fill = 0:0),
+      height = unit(0.55, "cm"),
+      labels = c("I", "IIa", "IIc"),
+      labels_gp = gpar(col = "black", 
+                       fontsize = 10),
+      )
+   
+    ),
+  column_km = 3,
+  row_split = gp$gp,
+  
+  # LEFT ANNOTATION 
+  left_annotation = rowAnnotation(foo = anno_block(gp = gpar(fill = 0:0),
+                                                   labels = c("gp1", "gp2", "gp3"),
+                                                   width = unit(0.55, "cm"),
+                                                   labels_gp = gpar(col = "black", fontsize = 10)),
+                                  "Mean inhibition\nweight"=anno_barplot(weight$mean_weight,
+                                                                           width = unit(1,"cm"))),
+  
+  row_km = 3,
+  
+  # RIGHT ANNOTATION
+  right_annotation = ha_EGDe
+)
+p
+
+# Export
+tiff(file.path("output","occurence.tiff"),
+     units="in", width=6,height=7,res=1000)
+p
+dev.off()
+rm(p)
+```
+
+# REFERENCES
+```{r}
+sessionInfo()
+```
+
+
